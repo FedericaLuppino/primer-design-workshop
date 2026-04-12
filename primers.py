@@ -40,8 +40,8 @@ Requirements
 import dataclasses
 from dataclasses import dataclass, field
 from typing import Optional, List
-import requests
 from Bio.SeqUtils import MeltingTemp as mt
+from Bio import SeqIO
 
 
 # =============================================================================
@@ -114,12 +114,11 @@ def _reverse_complement(sequence: str) -> str:
 
 
 def _fetch_sequence_from_ensembl(chrom: str, start: int, end: int,
-                                  genome: str) -> str:
+                                  genome_path: str) -> str:
     """
-    Download a small piece of a genome sequence from the Ensembl REST API.
-
-    This contacts the Ensembl website to retrieve just the region you need —
-    there is no need to download the entire genome file (which can be gigabytes!).
+    Gets the requested coordinates from the existing, downloaded file. 
+    This is suffcient for Drosophila, where genomes are small and allows
+    us to manually cross-check our sequences against the file
 
     Parameters
     ----------
@@ -129,8 +128,8 @@ def _fetch_sequence_from_ensembl(chrom: str, start: int, end: int,
         Start position (1-based, inclusive).
     end : int
         End position (1-based, inclusive).
-    genome : str
-        Ensembl species name, e.g. "drosophila_melanogaster".
+    genome_path : str
+        Path to the genome to use for reference
 
     Returns
     -------
@@ -142,33 +141,20 @@ def _fetch_sequence_from_ensembl(chrom: str, start: int, end: int,
     ValueError
         If Ensembl cannot find the region or the request fails.
     """
-    url = (
-        f"https://rest.ensembl.org/sequence/region/{genome}/"
-        f"{chrom}:{start}..{end}"
-    )
-    headers = {"Content-Type": "text/plain"}
-
-    response = requests.get(url, headers=headers, timeout=30)
-
-    if response.status_code != 200:
-        raise ValueError(
-            f"\nCould not fetch sequence from Ensembl. "
-            f"Please check your chromosome name and coordinates.\n"
-            f"  Genome  : {genome}\n"
-            f"  Region  : {chrom}:{start}-{end}\n"
-            f"  URL     : {url}\n"
-            f"  Error   : {response.text.strip()}\n\n"
-            f"Tip: For Drosophila, chromosome names are '2L', '2R', '3L', '3R', 'X', '4'.\n"
-            f"     For human, try 'homo_sapiens' with chromosome names like '1', '2', 'X'."
-        )
-
-    sequence = response.text.strip().upper()
-
+    sequence = ''
+    chr_sizes = {}
+    try:
+        for chromosome in SeqIO.parse(genome_path,'fasta'):
+            chr_sizes[chromosome.id] = len(chromosome.seq)
+            if chromosome.id != chrom:
+                continue
+            sequence = str(chromosome.seq[start:end])
+    except Exception as e:
+        print(f'Encountered error during sequence extraction: {e}')
     if not sequence:
-        raise ValueError(
-            f"Ensembl returned an empty sequence for {genome} {chrom}:{start}-{end}."
-        )
-
+        print(f'Did not find any hits for {chrom}:{start}-{end}.\nEncountered chromosomes:')
+        for chr_id, size in chr_sizes:
+            print(f'\t{chr_id}:\t{size}')
     return sequence
 
 
@@ -180,7 +166,7 @@ def design_primers(
     chrom: str,
     start: int,
     end: int,
-    genome: str = "drosophila_melanogaster",
+    genome_path: str = 'd_melanogaster.filtered.fasta',
     kmer_lengths: Optional[List[int]] = None,
     include_reverse_complement: bool = True,
 ) -> List[Primer]:
@@ -199,9 +185,8 @@ def design_primers(
         Start position on the chromosome (1-based, inclusive).
     end : int
         End position on the chromosome (1-based, inclusive).
-    genome : str, optional
-        Ensembl species name. Default is "drosophila_melanogaster".
-        Other examples: "homo_sapiens", "mus_musculus", "danio_rerio".
+    genome_path : str, optional
+        Path to the genome to use for reference
     kmer_lengths : list of int, optional
         Which primer lengths (in bp) to generate.
         Default is [20, 21, 22, 23].
@@ -255,8 +240,8 @@ def design_primers(
         )
 
     # ---- Fetch the sequence from Ensembl ----
-    print(f"Fetching {chrom}:{start}-{end} from Ensembl ({genome})...")
-    sequence = _fetch_sequence_from_ensembl(chrom, start, end, genome)
+    print(f"Fetching {chrom}:{start}-{end} from reference genome ({genome_path})...")
+    sequence = _fetch_sequence_from_ensembl(chrom, start, end, genome_path)
     region_length = len(sequence)
     print(f"  Got {region_length} bp.")
 
@@ -292,7 +277,7 @@ def design_primers(
                 start    = kmer_start,
                 end      = kmer_end,
                 strand   = "+",
-                genome   = genome,
+                genome   = genome_path,
             ))
 
             # Reverse complement primer (same genomic location, opposite strand)
@@ -304,7 +289,7 @@ def design_primers(
                     start    = kmer_start,
                     end      = kmer_end,
                     strand   = "-",
-                    genome   = genome,
+                    genome   = genome_path,
                 ))
 
     strands_msg = "forward + reverse complement" if include_reverse_complement else "forward only"
